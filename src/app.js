@@ -13,7 +13,10 @@ import { errorHandler } from "./middleware/error.js";
 
 const app = express();
 
-app.use(cors({ origin: "*" }));
+const allowedOrigins = [process.env.CLIENT_URL, "http://localhost:5173"].filter(
+  Boolean,
+);
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
