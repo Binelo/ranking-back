@@ -79,20 +79,23 @@ function makeSchedule(groups) {
   return schedule;
 }
 
+// Id como string, mesmo se o campo estiver populado (String(doc) não retorna o id)
+const idOf = (v) => String(v?._id ?? v);
+
 // Classificação de um grupo: vitórias; empate a dois decidido pelo confronto direto
 function standingsOf(session, gi) {
   const group = session.groups[gi];
-  const wins = new Map(group.items.map((id) => [String(id), 0]));
+  const wins = new Map(group.items.map((id) => [idOf(id), 0]));
   const beat = new Map(); // vencedor -> Set(perdedores)
   for (const d of session.groupSchedule) {
     if (d.group !== gi || !d.winner) continue;
-    const w = String(d.winner);
-    const l = String(d.winner) === String(d.a) ? String(d.b) : String(d.a);
+    const w = idOf(d.winner);
+    const l = w === idOf(d.a) ? idOf(d.b) : idOf(d.a);
     wins.set(w, (wins.get(w) || 0) + 1);
     if (!beat.has(w)) beat.set(w, new Set());
     beat.get(w).add(l);
   }
-  const ids = group.items.map(String);
+  const ids = group.items.map(idOf);
   ids.sort((x, y) => {
     const dw = (wins.get(y) || 0) - (wins.get(x) || 0);
     if (dw) return dw;
@@ -150,6 +153,35 @@ function buildKnockout(session) {
 
 // ---------- helpers ----------
 
+// Estado mutável de um pick — tudo que precisa ser restaurado num undo.
+// (groups e groupSchedule não entram: só o campo winner do duelo muda,
+// e ele é limpo diretamente no undo.)
+function snapshotOf(session) {
+  return {
+    status: session.status,
+    phase: session.phase,
+    currentRound: session.currentRound,
+    groupDuelIndex: session.groupDuelIndex,
+    pool: session.pool.map(String),
+    winners: session.winners.map(String),
+    eliminated: session.eliminated.map((e) => ({ item: String(e.item), round: e.round, order: e.order })),
+    finalRanking: session.finalRanking.map(String),
+    finishedAt: session.finishedAt,
+  };
+}
+
+function restoreSnapshot(session, snap) {
+  session.status = snap.status;
+  session.phase = snap.phase;
+  session.currentRound = snap.currentRound;
+  session.groupDuelIndex = snap.groupDuelIndex;
+  session.pool = snap.pool;
+  session.winners = snap.winners;
+  session.eliminated = snap.eliminated;
+  session.finalRanking = snap.finalRanking;
+  session.finishedAt = snap.finishedAt;
+}
+
 function progressOf(session) {
   const total = session.duelsTotal || Math.max(session.totalItems - 1, 0);
   return { duelsDone: session.history.length, duelsTotal: total };
@@ -203,6 +235,8 @@ async function sessionPayload(session) {
   }
 
   json.progress = progressOf(session);
+  json.canUndo = session.history.length > 0 && !!session.undoState;
+  delete json.undoState;
   delete json.pool; // não expõe a ordem futura (evita spoiler)
   delete json.groupSchedule;
   delete json.groups;
@@ -298,6 +332,10 @@ router.post('/:id/pick', requireAuth, async (req, res, next) => {
     const winnerId = String(req.body.winnerId);
     let loserId;
 
+    // snapshot para poder desfazer (o pick pode virar rodada/fase ou encerrar)
+    session.undoState = snapshotOf(session);
+    session.markModified('undoState');
+
     if (session.mode === 'tournament' && session.phase === 'groups') {
       // ----- duelo de fase de grupos -----
       const duel = currentGroupDuel(session);
@@ -346,6 +384,7 @@ router.post('/:id/pick', requireAuth, async (req, res, next) => {
     const lElo = lDoc?.stats?.elo ?? 1000;
     const expectedWin = 1 / (1 + 10 ** ((lElo - wElo) / 400));
     const eloDelta = Math.max(1, Math.round(K * (1 - expectedWin)));
+    session.history[session.history.length - 1].eloDelta = eloDelta;
 
     await RankItem.bulkWrite([
       { updateOne: { filter: { _id: winnerId }, update: { $inc: { 'stats.duelsPlayed': 1, 'stats.duelWins': 1, 'stats.elo': eloDelta } } } },
@@ -361,6 +400,63 @@ router.post('/:id/pick', requireAuth, async (req, res, next) => {
     next(err);
   }
 });
+
+// POST /api/sessions/:id/undo — desfaz o último duelo (1 passo)
+router.post('/:id/undo', requireAuth, async (req, res, next) => {
+  try {
+    const session = await RankSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Sessão não encontrada' });
+    if (String(session.user) !== req.userId) return res.status(403).json({ error: 'Sem permissão' });
+    if (!session.history.length || !session.undoState) {
+      return res.status(400).json({ error: 'Nada para desfazer' });
+    }
+
+    const last = session.history[session.history.length - 1];
+    const winnerId = String(last.winner);
+    const loserId = String(last.loser);
+    const eloDelta = last.eloDelta || 0;
+
+    // se a sessão tinha acabado de terminar, reverte as estatísticas finais
+    if (session.status === 'finished') await revertFinalStats(session);
+
+    // reverte ELO e contadores de duelo
+    await RankItem.bulkWrite([
+      { updateOne: { filter: { _id: winnerId }, update: { $inc: { 'stats.duelsPlayed': -1, 'stats.duelWins': -1, 'stats.elo': -eloDelta } } } },
+      { updateOne: { filter: { _id: loserId }, update: { $inc: { 'stats.duelsPlayed': -1, 'stats.elo': eloDelta } } } },
+    ]);
+
+    restoreSnapshot(session, session.undoState);
+    if (last.stage === 'grupos' && session.groupSchedule[session.groupDuelIndex]) {
+      session.groupSchedule[session.groupDuelIndex].winner = null;
+      session.markModified('groupSchedule');
+    }
+    session.history.pop();
+    session.undoState = null; // apenas 1 passo de undo
+    session.markModified('undoState');
+
+    await session.save();
+    res.json({ session: await sessionPayload(session) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+async function revertFinalStats(session) {
+  const ops = session.finalRanking.map((itemId, idx) => ({
+    updateOne: {
+      filter: { _id: itemId },
+      update: {
+        $inc: {
+          'stats.timesRanked': -1,
+          'stats.sumPositions': -(idx + 1),
+          ...(idx === 0 ? { 'stats.winCount': -1 } : {}),
+        },
+      },
+    },
+  }));
+  if (ops.length) await RankItem.bulkWrite(ops);
+  await Rank.updateOne({ _id: session.rank }, { $inc: { 'stats.sessionsCount': -1 } });
+}
 
 async function applyFinalStats(session) {
   const ops = session.finalRanking.map((itemId, idx) => ({

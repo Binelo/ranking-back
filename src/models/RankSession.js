@@ -6,6 +6,7 @@ const duelSchema = new mongoose.Schema(
     stage: { type: String, enum: ['grupos', 'mata-mata'], default: 'mata-mata' },
     winner: { type: mongoose.Schema.Types.ObjectId, ref: 'RankItem' },
     loser: { type: mongoose.Schema.Types.ObjectId, ref: 'RankItem' },
+    eloDelta: { type: Number, default: 0 }, // pontos transferidos (para desfazer)
     at: { type: Date, default: Date.now },
   },
   { _id: false }
@@ -62,6 +63,9 @@ const rankSessionSchema = new mongoose.Schema(
     history: [duelSchema],
     finalRanking: [{ type: mongoose.Schema.Types.ObjectId, ref: 'RankItem' }],
     finishedAt: { type: Date, default: null },
+
+    // snapshot do estado anterior ao último pick (permite desfazer 1 passo)
+    undoState: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );
