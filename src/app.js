@@ -10,6 +10,7 @@ import statsRoutes from "./routes/stats.js";
 import uploadRoutes from "./routes/upload.js";
 import userRoutes from "./routes/users.js";
 import { errorHandler } from "./middleware/error.js";
+import { connectDB } from "./db.js";
 
 const app = express();
 
@@ -20,6 +21,16 @@ app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+// Garante conexão com o Mongo antes de qualquer rota (necessário em serverless)
+app.use(async (_req, _res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
