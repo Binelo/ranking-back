@@ -331,10 +331,25 @@ router.post('/:id/pick', requireAuth, async (req, res, next) => {
       normalize(session);
     }
 
-    // estatísticas de duelo (imediatas)
+    // estatísticas de duelo + ELO (imediatas)
+    // itens criados antes do campo elo existir: inicializa em 1000 antes do $inc
+    await RankItem.updateMany(
+      { _id: { $in: [winnerId, loserId] }, 'stats.elo': { $exists: false } },
+      { $set: { 'stats.elo': 1000 } }
+    );
+    const K = 32;
+    const [wDoc, lDoc] = await Promise.all([
+      RankItem.findById(winnerId).select('stats.elo'),
+      RankItem.findById(loserId).select('stats.elo'),
+    ]);
+    const wElo = wDoc?.stats?.elo ?? 1000;
+    const lElo = lDoc?.stats?.elo ?? 1000;
+    const expectedWin = 1 / (1 + 10 ** ((lElo - wElo) / 400));
+    const eloDelta = Math.max(1, Math.round(K * (1 - expectedWin)));
+
     await RankItem.bulkWrite([
-      { updateOne: { filter: { _id: winnerId }, update: { $inc: { 'stats.duelsPlayed': 1, 'stats.duelWins': 1 } } } },
-      { updateOne: { filter: { _id: loserId }, update: { $inc: { 'stats.duelsPlayed': 1 } } } },
+      { updateOne: { filter: { _id: winnerId }, update: { $inc: { 'stats.duelsPlayed': 1, 'stats.duelWins': 1, 'stats.elo': eloDelta } } } },
+      { updateOne: { filter: { _id: loserId }, update: { $inc: { 'stats.duelsPlayed': 1, 'stats.elo': -eloDelta } } } },
     ]);
 
     const justFinished = session.status === 'finished';

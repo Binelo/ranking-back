@@ -9,7 +9,10 @@ router.get('/items', async (req, res, next) => {
   try {
     const { by = 'champions', category, limit = 25 } = req.query;
 
-    const match = { 'stats.timesRanked': { $gte: 1 } };
+    // ELO conta a partir do primeiro duelo; os demais exigem sessão concluída
+    const match = by === 'elo'
+      ? { 'stats.duelsPlayed': { $gte: 1 } }
+      : { 'stats.timesRanked': { $gte: 1 } };
     if (category) match.categories = new mongoose.Types.ObjectId(String(category));
 
     if (by === 'avgPosition' || by === 'winRate') {
@@ -39,6 +42,7 @@ router.get('/items', async (req, res, next) => {
     const sortMap = {
       champions: { 'stats.winCount': -1 },
       mostUsed: { 'stats.timesRanked': -1 },
+      elo: { 'stats.elo': -1 },
     };
     const items = await RankItem.find(match)
       .sort(sortMap[by] || sortMap.champions)

@@ -17,6 +17,7 @@ const rankItemSchema = new mongoose.Schema(
       winCount: { type: Number, default: 0 }, // vezes campeão
       duelsPlayed: { type: Number, default: 0 },
       duelWins: { type: Number, default: 0 },
+      elo: { type: Number, default: 1000, index: true },
       sumPositions: { type: Number, default: 0 }, // para posição média
     },
   },
